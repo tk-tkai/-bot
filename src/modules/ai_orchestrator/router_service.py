@@ -68,10 +68,19 @@ class AIRouterService:
         return response
 
     def _generate_emergency_fallback_response(self) -> dict:
+        return {
+            "regime": "UNKNOWN_LIMIT_REACHED",
+            "confidence_score": 0.0,
+            "reasoning": "Emergency Fallback: All AI provider connections lost or limit reached. Bypass to Technical Rules.",
+            "emergency_bypass": True
+        }
+
+    def analyze_market(self, market_context: dict) -> dict:
         """
-        สร้างโครงสร้างข้อมูลฉุกเฉินกรณีระบบ AI ตัดการทำงานทั้งหมด 
-        เพื่อบอกให้ Strategy Engine เปิดระบบคำนวณด้วยสูตรคณิตศาสตร์เพียวๆ
+        สร้าง Alias ฟังก์ชันเพื่อรองรับท่อส่งข้อมูล (Pipeline) ในไฟล์ main.py
         """
+        return self.get_market_analysis(market_context)
+        
         return {
             "regime": "UNKNOWN_LIMIT_REACHED",
             "confidence_score": 0.0,

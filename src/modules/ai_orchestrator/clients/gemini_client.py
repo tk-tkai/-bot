@@ -10,7 +10,7 @@ class GeminiClient:
     """
     def __init__(self):
         # โหลด API Key จาก Environment Variables
-        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.api_key = os.getenv("GEMINI_API_KEY", "mock_key")
         if not self.api_key:
             raise ValueError("Missing GEMINI_API_KEY in environment variables.")
         

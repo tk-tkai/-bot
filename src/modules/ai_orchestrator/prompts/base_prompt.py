@@ -1,4 +1,6 @@
-class AIPromptTemplate:
+import json
+
+class BasePrompt:
     """
     คลังเก็บ System Prompt และโครงสร้าง JSON Spec สำหรับควบคุม AI Orchestrator 
     ตามกฎเหล็ก AI is Advisor, NOT a Trader
@@ -16,25 +18,25 @@ CRITICAL DIRECTIVES:
 
 You must output exactly in this JSON schema format:
 {
-    "analysis_status": "SUCCESS" or "INSUFFICIENT_DATA",
-    "market_regime": "BULLISH" or "BEARISH" or "SIDEWAYS_RANGING",
-    "primary_reasoning": "A brief text explaining your structural trend analysis based on indicators.",
-    "confidence_score": 0.00 to 1.00,
-    "key_levels": {
-        "target_resistance": 0.0,
-        "invalidated_support": 0.0
-    },
-    "recommended_bias": "LONG" or "SHORT" or "FLAT"
+    "regime": "BULLISH",
+    "confidence_score": 0.85,
+    "reasoning": "Text explaining your structural trend analysis based on indicators."
 }
 """
 
     @staticmethod
-    def build_user_context_prompt(market_context: dict) -> str:
+    def format_user_context(market_context: dict) -> str:
         """
         แปลงข้อมูล Market Context จากส่วนที่ 1 ให้กลายเป็นข้อความดิบส่งให้ AI วิเคราะห์
+        (แก้ไขไวยากรณ์ String และโครงสร้างปีกกาปิดเรียบร้อยแล้ว)
         """
-        import json
+        # 1. แปลงโครงสร้าง Dictionary เป็น JSON String ให้เสร็จก่อนเพื่อความปลอดภัย
+        market_context_json_str = json.dumps(market_context, indent=2)
+        
+        # 2. ส่งค่ากลับพร้อมปิดปีกกา ตัวครอบ Markdown (```) และฟันหนู 3 ตัว (""") ให้ครบถ้วนสมบูรณ์
         return f"""The following is the real-time Multi-Timeframe Market Context with Technical Indicators:
 
 ```json
-{json.dumps(market_context, indent=2)}
+{market_context_json_str}
+```
+"""
