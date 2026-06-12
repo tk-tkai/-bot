@@ -1,28 +1,51 @@
+import logging
+from src.core.config import settings
+
+logger = logging.getLogger("PositionTracker")
+
 class PositionTracker:
-    def __init__(self, risk_per_trade_pct: float = 1.0):
-        """
-        ระบบจัดการหน้าตักและคำนวณขนาดไม้ (Position Sizing Tracker)
-        :param risk_per_trade_pct: เปอร์เซ็นต์ความเสี่ยงของพอร์ตที่ยอมให้เสียได้ต่อไม้ (Default: 1%)
-        """
-        self.risk_per_trade_pct = risk_per_trade_pct
-        self.open_positions = {}
+    """
+    Position Tracker: เฝ้าระวังและติดตามสถานะออเดอร์ค้างพอร์ตแบบ Real-time
+    คำนวณค่า PnL ล็อกเงื่อนไขการตัดขาดทุนและทำกำไร (Stop-Loss / Take-Profit Guardian)
+    """
+    def __init__(self):
+        self.max_loss_usd = settings.MAX_LOSS_PER_TRADE_USD # ดึงค่า $1 มาคุมหน้างาน
 
-    def calculate_dynamic_size(self, balance: float, entry_price: float, stop_loss: float) -> float:
+    def check_position_status(self, position: dict, current_price: float) -> dict:
         """
-        คำนวณขนาดไม้ (Quantity) ตามระยะ Stop Loss เพื่อคุมความเสี่ยงให้อยู่ในกฎเหล็กเป๊ะๆ
-        สูตร: Quantity = (Balance * Risk%) / (Entry Price - Stop Loss)
+        ตรวจสอบสถานะ PnL ของโพสิชั่นปัจจุบัน และส่งสัญญาณ Action ออกมาหากเข้าเงื่อนไขคัตเอาท์
+        - position structure: {"symbol": str, "entry_price": float, "size": float, "direction": str}
         """
-        risk_amount = balance * (self.risk_per_trade_pct / 100.0)
-        stop_distance = abs(entry_price - stop_loss)
-        
-        if stop_distance == 0:
-            return 0.0
-            
-        raw_qty = risk_amount / stop_distance
-        return round(raw_qty, 4)  # ปัดทศนิยม 4 ตำแหน่งมาตรฐานคริปโต
+        symbol = position.get("symbol", "UNKNOWN")
+        entry_price = float(position.get("entry_price", 0.0))
+        size = float(position.get("size", 0.0))
+        direction = position.get("direction", "LONG").upper()
 
-    def update_position_status(self, symbol: str, qty: float, side: str):
-        if qty == 0:
-            self.open_positions.pop(symbol, None)
-        else:
-            self.open_positions[symbol] = {"quantity": qty, "side": side}
+        if size == 0 or entry_price == 0:
+            return {"action": "HOLD", "pnl_usd": 0.0, "reason": "ไม่มีโพสิชั่นถือครองค้างอยู่"}
+
+        # 1. คำนวณหา Unrealized PnL ตามฝั่งการเทรด (Long / Short)
+        if direction == "LONG":
+            pnl_usd = (current_price - entry_price) * size
+        else: # SHORT Position
+            pnl_usd = (entry_price - current_price) * size
+
+        logger.info(f"🔄 [Monitoring] {symbol} | Side: {direction} | Price: {current_price} | Entry: {entry_price} | PnL: ${pnl_usd:.2f}")
+
+        # 2. ด่านตรวจกฎเหล็กคัตเอาท์ติดลบเกิน $1 USD (Hard Stop Loss)
+        if pnl_usd <= -self.max_loss_usd:
+            logger.warning(f"🚨 [CRITICAL CUTOUT] ยอดติดลบถึงเกณฑ์จำกัดความเสี่ยง (${pnl_usd:.2f} <= -${self.max_loss_usd}) สั่งปิดสัญญาด่วน!")
+            return {"action": "MARKET_CLOSE", "pnl_usd": pnl_usd, "reason": f"ชนเกณฑ์จำกัดความเสี่ยงดักขาดทุน {self.max_loss_usd} USD"}
+
+        # 3. ด่านตรวจเงื่อนไขทำกำไรเป้าหมาย (Take Profit - ตั้งค่าสัดส่วน Risk/Reward ไว้ที่ 1:2 ขยับตามความเหมาะสม)
+        target_profit_usd = self.max_loss_usd * 2.0 # เป้าทำกำไรที่ $2 USD
+        if pnl_usd >= target_profit_usd:
+            logger.info(f"💰 [TAKE PROFIT reached] ยอดกำไรถึงเป้าหมายการันตีรางวัล (${pnl_usd:.2f} >= ${target_profit_usd}) สั่งล็อกกำไรเข้าพอร์ต!")
+            return {"action": "MARKET_CLOSE", "pnl_usd": pnl_usd, "reason": f"กำไรถึงเป้าหมาย Risk/Reward Ratio (${target_profit_usd} USD)"}
+
+        # 4. หากราคายังวิ่งสวิงอยู่ในกรอบปลอดภัย ให้ถือประคองสัญญาต่อ
+        return {"action": "HOLD", "pnl_usd": pnl_usd, "reason": "ราคายังวิ่งอยู่ในกรอบความเสี่ยงที่ปลอดภัย"}
+
+    
+# สร้างอินสแตนซ์พร้อมใช้งานแบบ Singleton
+position_tracker = PositionTracker()

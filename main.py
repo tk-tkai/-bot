@@ -1,20 +1,5 @@
 import os
 import logging
-current_dir = os.path.dirname(os.path.abspath(__file__))
-env_path = os.path.join(current_dir, '.env')
-
-if os.path.exists(env_path):
-    with open(env_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if '=' in line:
-                key, value = line.split('=', 1)
-                # ดึงค่าฝังเข้า Environment Variables ของ Windows ชั่วคราวในระดับ Memory
-                os.environ[key.strip()] = value.strip()
-else:
-    logging.warning("⚠️ ไม่พบไฟล์ .env ระบบจะใช้ค่า Default ในเครื่อง")
 import time
 from src.modules.market_data.indicator_engine import IndicatorEngine
 from src.modules.ai_orchestrator.router_service import AIRouterService
@@ -23,130 +8,81 @@ from src.modules.risk_management.order_validator import OrderValidator
 from src.modules.order_executor.exchange_client import ExchangeClient
 from src.modules.order_executor.position_tracker import PositionTracker
 
-# ตั้งค่าระบบ Log ให้เห็นการทำงานของบ็อทในแต่ละสเต็ปอย่างละเอียด
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s')
 logger = logging.getLogger("TradingBotMain")
 
 class TradingBotCore:
     def __init__(self):
-        logger.info("Initializing Institutional Trading Bot Core...")
-        
-        # ประกอบร่างโมดูลทั้ง 5 ส่วนตามพิมพ์เขียว
         self.indicator_engine = IndicatorEngine()
         self.ai_orchestrator = AIRouterService()
-        self.risk_engine = RiskEngine(max_daily_loss_pct=16.67, max_drawdown_pct=20.0)
+        self.risk_engine = RiskEngine()
         self.order_validator = OrderValidator(min_notional=10.0, max_notional=500.0)
         self.exchange_client = ExchangeClient()
-        self.position_tracker = PositionTracker(risk_per_trade_pct=1.67) # ความเสี่ยง 1% ต่อไม้
+        self.position_tracker = PositionTracker()
+        # สถานะโพสิชั่นจำลอง (ในระบบจริงต้องดึงจาก Database/API)
+        self.active_position = {} 
 
-    def run_pipeline_cycle(self, symbol: str, timeframe: str, mock_market_data: dict, account_metrics: dict):
-        """
-        ท่อส่งข้อมูลการทำงานจริง (Runtime Pipeline Step 6 - 9)
-        """
-        logger.info(f"=== Starting New Trading Cycle for {symbol} ({timeframe}) ===")
+    def run_pipeline_cycle(self, symbol: str, timeframe: str, mock_market_data: dict, account_metrics: dict, total_drawdown: float):
+        logger.info(f"🔄 === Starting New Trading Cycle for {symbol} ({timeframe}) ===")
 
-        # STAGE 1: ตรวจสอบสุขภาพพอร์ตรวมก่อน (Risk Engine Check)
-        if not self.risk_engine.check_portfolio_health(account_metrics):
-            logger.warning("Cycle Aborted: Portfolio health check failed. Lockout active.")
+        # STAGE 1: ตรวจสอบสุขภาพพอร์ต
+        current_balance = account_metrics.get("balance", 0.0)
+        if not self.risk_engine.validate_portfolio_health(current_balance, total_drawdown):
+            logger.warning("Cycle Aborted: Portfolio health check failed.")
             return
 
-        # STAGE 2: คำนวณอินดิเคเตอร์ทางเทคนิคัล (Deterministic Calculation)
-        logger.info("Stage 2: Calculating technical indicators...")
-        # ดึงข้อมูลแท่งเทียนจำลองจากประวัติ
         candles = mock_market_data.get(symbol, {}).get(timeframe, [])
-        if not candles:
-            logger.error("Cycle Aborted: No historical candle data found.")
-            return
-            
         market_context = self.indicator_engine.calculate_indicators_snapshot(candles, fib_lookback=20)
         current_price = market_context["current_price"]
 
-        # STAGE 3: ส่งข้อมูลให้ AI Orchestrator วิเคราะห์สภาวะตลาด
-        logger.info("Stage 3: Fetching AI Orchestrator analysis...")
+        # ตรวจสอบ Position ค้าง โดยใช้ฟังก์ชัน check_position_status ที่พี่เขียนไว้
+        if self.active_position:
+            status = self.position_tracker.check_position_status(self.active_position, current_price)
+            if status["action"] == "MARKET_CLOSE":
+                self.exchange_client.execute_market_order(
+                    symbol=self.active_position["symbol"],
+                    side="SELL" if self.active_position["direction"] == "LONG" else "BUY",
+                    quantity=self.active_position["size"]
+                )
+                logger.info(f"🛑 [AUTO CLOSE] {status['reason']}")
+                self.active_position = {} # ล้างโพสิชั่นเมื่อปิดสัญญา
+            else:
+                logger.info(f"📋 {status['reason']}")
+            return 
+
+        # STAGE 2 & 3: วิเคราะห์ตลาดโดย AI
         ai_analysis = self.ai_orchestrator.analyze_market(market_context)
         
-        if not ai_analysis or "regime" not in ai_analysis:
-            logger.error("Cycle Aborted: AI Analysis returned invalid or empty data.")
-            return
-
-        regime = ai_analysis.get("regime")
-        confidence = ai_analysis.get("confidence_score", 0.0)
-        reasoning = ai_analysis.get("reasoning", "")
-        logger.info(f"AI Decision: [{regime}] (Confidence: {confidence:.2f}) - {reasoning}")
-
-        # STAGE 4: แปลงบทวิเคราะห์เป็นแผนการเทรด (Trade Proposal Formulation)
-        if regime == "BULLISH" and confidence >= 0.70:
-            side = "BUY"
-            # ตั้ง Stop Loss ไว้ที่แนวรับสำคัญ Fibonacci Level ด้านล่าง (สมมติลบออก $1,000 จากราคาปัจจุบัน)
-            stop_loss = current_price - 1000.0
-        elif regime == "BEARISH" and confidence >= 0.70:
-            side = "SELL"
-            # ตั้ง Stop Loss ไว้ที่แนวต้านสำคัญด้านบน
-            stop_loss = current_price + 1000.0
-        else:
-            logger.info("Decision: STAY FLAT (Signal strength or confidence insufficient).")
-            return
-
-        # STAGE 5: คำนวณขนาดไม้ตามความเสี่ยง (Dynamic Position Sizing)
-        quantity = self.position_tracker.calculate_dynamic_size(
-            balance=account_metrics["current_equity"],
-            entry_price=current_price,
-            stop_loss=stop_loss
-        )
-
-        order_proposal = {
-            "symbol": symbol,
-            "side": side,
-            "quantity": quantity,
-            "price": current_price,
-            "stop_loss": stop_loss
-        }
-
-        # STAGE 6: ส่งให้ Order Validator ตรวจกฎเหล็กความปลอดภัยสุดท้ายก่อนยิงออก
-        if not self.order_validator.validate_order_spec(order_proposal):
-            logger.warning("Order Rejected: Blocked by Order Validator Rules.")
-            return
-
-        # STAGE 7: ยิงคำสั่งเข้า Exchange จริง (Atomic Execution)
-        order_receipt = self.exchange_client.execute_market_order(symbol, side, quantity)
-        
-        if order_receipt.get("status") == "FILLED":
-            self.position_tracker.update_position_status(symbol, quantity, side)
-            logger.info(f"🏆 Successfully executed trade! Position tracked for {symbol}.")
-        
-        # ล้างรอยนิ้วมือป้องกันการบล็อกออเดอร์ในลูปถัดไป
-        self.order_validator.clear_order_fingerprint(order_proposal)
-
+        # ใส่ลอจิกการตัดสินใจเพิ่ม
+        if ai_analysis and ai_analysis.get("confidence_score", 0) > 0.8:
+            action = "BUY" if ai_analysis["regime"] == "BULLISH" else "SELL"
+            
+            # 1. เตรียม Order Proposal
+            proposal = {
+                "symbol": symbol, "side": action, "quantity": 0.001, 
+                "price": current_price, "stop_loss": current_price * 0.98
+            }
+            
+            # 2. ตรวจสอบความถูกต้อง (Validator)
+            if self.order_validator.validate_order_spec(proposal):
+                # 3. ยิงคำสั่ง (Executor)
+                order = self.exchange_client.execute_market_order(symbol, action, proposal["quantity"])
+                self.active_position = {"symbol": symbol, "entry_price": current_price, "size": proposal["quantity"], "direction": action}
+                logger.info(f"✅ [ORDER SUCCESS] {action} {symbol} at {current_price}")
 
 if __name__ == "__main__":
-    # จำลองข้อมูลที่ได้มาจากระบบดึงราคา (Market Data) จังหวะราคาขาขึ้นชัดเจน
-    mock_candles = []
-    base_price = 65000.0
-    for i in range(40):
-        price = base_price + (i * 100)
-        mock_candles.append({
-            "symbol": "BTCUSDT", "timeframe": "1h", "timestamp": 1700000000 + (i * 3600),
-            "open": price - 50, "high": price + 150, "low": price - 100, "close": price, "volume": 1000.0
-        })
+    logger.info("🚀 [SYSTEM START] Initializing...")
+    mock_market_data = {"BTCUSDT": {"1h": [{"open": 64000, "high": 64500, "low": 63900, "close": 64200, "volume": 150}] * 30}}
+    mock_account_metrics = {"balance": 10000.0}
     
-    mock_market_data = {"BTCUSDT": {"1h": mock_candles}}
-
-    # จำลองสถานะบัญชีเงินทุนปัจจุบัน (Account Metrics)
-    mock_account_metrics = {
-        "initial_balance": 60.0,
-        "current_equity": 60.0,
-        "daily_realized_pnl": 0.0,
-        "peak_equity": 60.0
-    }
-
-    # สั่งเปิดบ็อททำงานรันลูปจำลอง
     bot = TradingBotCore()
-    bot.run_pipeline_cycle(
-        symbol="BTCUSDT",
-        timeframe="1h",
-        mock_market_data=mock_market_data,
-        account_metrics=mock_account_metrics
-    )
+    # จำลองว่ามีโพสิชั่นค้างอยู่เพื่อให้ระบบทดสอบการเช็ค PnL
+    bot.active_position = {"symbol": "BTCUSDT", "entry_price": 64000.0, "size": 0.001, "direction": "LONG"}
+
+    try:
+        while True:
+            bot.run_pipeline_cycle("BTCUSDT", "1h", mock_market_data, mock_account_metrics, 0.02)
+            time.sleep(3)
+    except KeyboardInterrupt:
+        logger.info("🛑 [SHUTDOWN] Bot stopped safely.")
+
